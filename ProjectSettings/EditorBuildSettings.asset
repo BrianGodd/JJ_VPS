@@ -6,29 +6,14 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 0
-    path: Assets/Scenes/SampleScene.unity
-    guid: 23743ad67792a80479ea4267b627a9ae
-  - enabled: 0
-    path: Assets/Scenes/JJ_X_Immersal.unity
-    guid: ad8a6384c5b2c2c4e8380b0ec714e66c
-  - enabled: 0
-    path: Assets/Scenes/JJ_X_Immersal_Big.unity
-    guid: db299cbcbaaf8044dab039731470cdfc
-  - enabled: 0
-    path: Assets/Scenes/JJ_X_Immersal_NOAR.unity
-    guid: 1831f8c6b79f93c44925c8c673933582
-  - enabled: 0
-    path: Assets/Scenes/JJ_X_Immersal_Big 1.unity
-    guid: 96a31807f1b81bd4cac6132d7fba4c10
-  - enabled: 0
-    path: Assets/Scenes/Immersal_MobileVPS.unity
-    guid: df9c788c42c52294b9d47404fd79a547
-  - enabled: 0
-    path: Assets/Scenes/Immersal_MobileVPS_RAG.unity
-    guid: d714627da75b000439f440c39fe613cf
-  - enabled: 1
     path: Assets/Scenes/Immersal_JJVPS_RAG.unity
     guid: a4abafb6ebf1a0543ae4491a52046537
+  - enabled: 1
+    path: Assets/Scenes/MultiSet_Menu.unity
+    guid: 34c140d56daf26f41a2760539543e42c
+  - enabled: 1
+    path: Assets/Scenes/MultiSet_JJVPS_RAG.unity
+    guid: 8a7e6ea2febb9ac4ea59052df71f9a5f
   m_configObjects:
     UnityEditor.XR.ARCore.ARCoreSettings: {fileID: 11400000, guid: 80cdb83c82637b048991d22979047e2e,
       type: 2}
@@ -40,3 +25,4 @@ EditorBuildSettings:
       type: 2}
     com.unity.xr.openxr.settings4: {fileID: 11400000, guid: 760a8cd648d8e604f95b50073a7a9394,
       type: 2}
+  m_UseUCBPForAssetBundles: 0

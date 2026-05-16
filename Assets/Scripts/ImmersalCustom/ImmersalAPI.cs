@@ -3,6 +3,7 @@ using UnityEngine.Networking;
 using System.Collections;
 using System.Text;
 using System.Collections.Generic;
+using System;
 using Immersal.XR;
 using UnityEngine.UI;
 using System.Linq;
@@ -58,6 +59,17 @@ public class SDKLocalizeResponse
 
 public class ImmersalAPI : MonoBehaviour
 {
+    [Serializable]
+    public class ImmersalLocalizationSnapshot
+    {
+        public bool success;
+        public int mapId = -1;
+        public Vector3 localizedPosition;
+        public Quaternion localizedRotation = Quaternion.identity;
+        public string rawResponse;
+        public string errorMessage;
+    }
+
     public RAGController RAGMaster;
     public IMUManager IMU;
     public GameObject XRPlayer, Player;
@@ -79,6 +91,12 @@ public class ImmersalAPI : MonoBehaviour
     public bool isAR = false, isTracking = false;
 
     public TextMeshProUGUI LocalizeInfoText, MapInfoText;
+
+    public bool IsLocalizing => isLocalizing;
+
+    public ImmersalLocalizationSnapshot LatestLocalization { get; private set; }
+
+    public event Action<ImmersalLocalizationSnapshot> LocalizationCompleted;
 
 
     // Start is called before the first frame update
@@ -141,6 +159,23 @@ public class ImmersalAPI : MonoBehaviour
     {
         imageData = ConvertUIImageToBase64();
         StartCoroutine(LocalizeImage(imageData));
+    }
+
+    public void LocalizeEncodedImage(byte[] encodedImageBytes, Vector4 intrinsicsOverride, string imageMimeType = "image/jpeg")
+    {
+        if (encodedImageBytes == null || encodedImageBytes.Length == 0)
+        {
+            NotifyLocalizationCompleted(new ImmersalLocalizationSnapshot
+            {
+                success = false,
+                errorMessage = "Encoded image bytes are empty."
+            });
+            return;
+        }
+
+        isLocalizing = true;
+        string base64Image = Convert.ToBase64String(encodedImageBytes);
+        StartCoroutine(LocalizeImage(base64Image, intrinsicsOverride));
     }
 
     //tracking again
@@ -235,6 +270,11 @@ public class ImmersalAPI : MonoBehaviour
 
     public IEnumerator LocalizeImage(string base64Image)
     {
+        yield return LocalizeImage(base64Image, GetDefaultIntrinsics());
+    }
+
+    public IEnumerator LocalizeImage(string base64Image, Vector4 intrinsicsOverride)
+    {
         base64Image = base64Image.Replace("\n", "").Replace("\r", "");
         SDKMapId[] sdkMapIds = mapIds.Select(id => new SDKMapId { id = id }).ToArray();
 
@@ -243,11 +283,10 @@ public class ImmersalAPI : MonoBehaviour
             token = token,
             mapIds = sdkMapIds,
             b64 = base64Image,
-            //ar glasses
-            ox = 630.465034f,
-            oy = 368.853068f,
-            fx = 1161.352133f,
-            fy = 1162.871712f
+            ox = intrinsicsOverride.z,
+            oy = intrinsicsOverride.w,
+            fx = intrinsicsOverride.x,
+            fy = intrinsicsOverride.y
             
             //PHONE
             // ox = 2000,
@@ -275,6 +314,11 @@ public class ImmersalAPI : MonoBehaviour
                 DebugResponse.text = "Error: " + request.error;
                 isLocalizing = false;
                 ShowLocalizeStatus(2);
+                NotifyLocalizationCompleted(new ImmersalLocalizationSnapshot
+                {
+                    success = false,
+                    errorMessage = request.error
+                });
             }
             else
             {
@@ -290,8 +334,45 @@ public class ImmersalAPI : MonoBehaviour
                 isLocalizing = false;
                 if(response.map == -1) ShowLocalizeStatus(1);
                 else ShowLocalizeStatus(0);
+                GetUnityPose(response, out Vector3 localizedPosition, out Quaternion localizedRotation);
+                NotifyLocalizationCompleted(new ImmersalLocalizationSnapshot
+                {
+                    success = response.map != -1,
+                    mapId = response.map,
+                    localizedPosition = localizedPosition,
+                    localizedRotation = localizedRotation,
+                    rawResponse = responseText,
+                    errorMessage = response.map == -1 ? "Pose not found." : null
+                });
             }
         }
+    }
+
+    private Vector4 GetDefaultIntrinsics()
+    {
+        return new Vector4(1161.352133f, 1162.871712f, 630.465034f, 368.853068f);
+    }
+
+    private void GetUnityPose(SDKLocalizeResponse response, out Vector3 position, out Quaternion rotation)
+    {
+        Matrix4x4 rotationMatrix = new Matrix4x4();
+        rotationMatrix.SetRow(0, new Vector4(response.r00, response.r01, response.r02, 0));
+        rotationMatrix.SetRow(1, new Vector4(response.r10, response.r11, response.r12, 0));
+        rotationMatrix.SetRow(2, new Vector4(response.r20, response.r21, response.r22, 0));
+        rotationMatrix.SetRow(3, new Vector4(0, 0, 0, 1));
+
+        Matrix4x4 mirrorX = Matrix4x4.Scale(new Vector3(-1, 1, 1));
+        Matrix4x4 correctedMatrix = mirrorX * rotationMatrix;
+
+        rotation = Quaternion.LookRotation(correctedMatrix.GetColumn(2), correctedMatrix.GetColumn(1));
+        rotation *= Quaternion.Euler(0, 0, 180);
+        position = new Vector3(-response.px, response.py, response.pz);
+    }
+
+    private void NotifyLocalizationCompleted(ImmersalLocalizationSnapshot snapshot)
+    {
+        LatestLocalization = snapshot;
+        LocalizationCompleted?.Invoke(snapshot);
     }
 
     public IEnumerator GetMapName(int id)
