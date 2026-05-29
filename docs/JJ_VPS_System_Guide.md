@@ -382,6 +382,7 @@ It supports:
 
 - AR-session-based localization
 - externally supplied image bytes and intrinsics
+- optional `queryPoseOverride` for localization math
 - repeated localization attempts
 - confidence filtering
 - background localization
@@ -410,6 +411,8 @@ instead of moving:
 - the AR camera
 
 This means the environment is aligned around the user rather than the user being repositioned in the world.
+
+In the current debug/testing path, MultiSet can also be configured so that localization pose math reads a stable tracking transform through `queryPoseOverride`, while a separate debug-motion child transform is moved for PC simulation. This avoids debug movement feeding back into map-space re-alignment.
 
 ### 4.4.4 `MultiSetVpsProviderAdapter`
 
@@ -481,6 +484,7 @@ Each `LocalizedMapPoiRecord` currently stores:
 This POI data is shared by:
 
 - label rendering
+- POI volume visualization and FOV gizmos
 - Agent passive trigger logic
 - Agent active question prompt context
 - future AI scene reasoning
@@ -488,6 +492,18 @@ This POI data is shared by:
 ### 4.5.5 Rendering Notes
 
 Labels are currently implemented as world-space UI and can be configured to render on top using a custom overlay material path.
+
+The current runtime also supports optional POI visualization under `LocalizedMapContextController`, including:
+
+- an inside volume based on `localScale`
+- a near volume based on `localScale + margin`
+- Scene-view FOV gizmos based on `angle1/angle2`
+
+The intended semantics are:
+
+- `localScale` defines the `Inside` region
+- `margin` extends outward from that region to define `Near`
+- `angle1/angle2` define a detection sector around the POI, not a user-facing-angle requirement
 
 ---
 
@@ -575,6 +591,7 @@ This layer provides two interaction modes:
 
 - reading current localized map context
 - computing user-to-POI distance and direction
+- computing POI detection-sector eligibility
 - determining near vs inside state
 - writing user state into TMP UI fields
 - constructing prompts
@@ -598,6 +615,14 @@ The trigger can use:
 
 with global Inspector values as fallback.
 
+Current POI state semantics are:
+
+- `Inside`: player is within the POI `localScale` volume
+- `Near`: player is outside `Inside` but still within `localScale + margin`
+- `FOV`: detection sector gate for `Near`, based on where the player stands relative to the POI sector; it is not based on where the player is looking
+
+When multiple POIs overlap, the current implementation selects the valid candidate with the smallest 2D world-plane distance in `x/z` from the player to the POI center.
+
 ### 4.7.4 Active Questioning
 
 When `MicController` routes to `Agent`, the voice path is:
@@ -617,6 +642,8 @@ The active question prompt includes:
 - all current POI relations
 
 This path is intentionally scene-aware rather than target-only.
+
+Active questioning currently has higher priority than passive guidance. A manual question can interrupt an in-progress passive TTS response. When that happens, the interrupted passive guidance is treated as handled, and its passive cooldown begins only after the manual TTS response finishes.
 
 ### 4.7.5 UI Outputs
 
@@ -814,6 +841,8 @@ The current Agent implementation no longer depends on the old `EditorManager` or
 7. `OnResponseReady` fires.
 8. TTS speech is played.
 
+If a passive response is currently speaking, step 4 can interrupt that passive speech and take priority immediately.
+
 ### 5.5 Passive Guidance Flow
 
 ```text
@@ -847,6 +876,8 @@ The current Agent implementation no longer depends on the old `EditorManager` or
 4. Passive prompt is generated.
 5. Guidance text is generated and spoken.
 
+Passive cooldown starts after passive TTS playback finishes. If a passive response is interrupted by a manual question, that passive response is treated as handled, and its cooldown starts after the manual response finishes instead.
+
 ---
 
 ## 6. Scene Setup Guidance
@@ -877,8 +908,29 @@ Typical reference wiring:
 - `AgentController.mapContextController` -> `LocalizedMapContextController`
 - `AgentController.localizationManager` -> `SingleFrameLocalizationManager`
 - `AgentController.userCamera` -> current user-facing camera
+- `SingleFrameLocalizationManager.queryPoseOverride` -> stable tracking transform when using a debug rig
+- `AgentController.userTransformOverride` -> debug camera or debug motion transform when simulating player movement
 - `MicController.agentController` -> `AgentController`
 - `MicController.ragController` -> `RAGController`
+
+### 6.2.1 Optional PC Debug Rig
+
+For PC-side simulation without feeding manual movement back into localization correction, the recommended hierarchy is:
+
+```text
+PlayerRig
+└─ TrackingRoot
+   └─ DebugMotionRoot
+      └─ Camera
+```
+
+Recommended usage:
+
+- `TrackingRoot` is used by `SingleFrameLocalizationManager.queryPoseOverride`
+- `DebugMotionRoot` is moved by `DebugPlayerRigController`
+- `Camera` is used by `AgentController.userCamera` and scene-view/player-facing debug flows
+
+This keeps localization pose input stable while still allowing keyboard/mouse debug movement for POI and Agent testing.
 
 ### 6.3 Audio Setup Recommendation
 
@@ -902,6 +954,7 @@ Important `SingleFrameLocalizationManager` fields:
 - `mapOrMapsetCode`
 - `localizationType`
 - `useARSessionForLocalization`
+- `queryPoseOverride`
 - `autoLocalize`
 - `firstLocalizationUntilSuccess`
 
@@ -924,8 +977,16 @@ Important `AgentController` fields:
 - `apiSettings.apiKey`
 - `processingAudioSource`
 - `audioSource`
+- `enablePassiveGuidance`
+- `passiveGuidanceScrollbar`
 - passive trigger values
 - TMP debug fields
+
+Current behavior notes:
+
+- `passiveGuidanceScrollbar.value = 1` enables passive guidance
+- `passiveGuidanceScrollbar.value = 0` disables passive guidance
+- toggling passive guidance resets passive stable-state tracking and cooldown state
 
 ### 7.4 Mic Configuration
 

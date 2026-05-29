@@ -6,6 +6,7 @@ using MultiSet;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.UI;
 
 public class AgentController : MonoBehaviour
 {
@@ -14,6 +15,12 @@ public class AgentController : MonoBehaviour
         None,
         Near,
         Inside
+    }
+
+    private enum AgentRequestKind
+    {
+        Manual,
+        Passive
     }
 
     [Header("References")]
@@ -39,6 +46,7 @@ public class AgentController : MonoBehaviour
 
     [Header("Passive Guidance")]
     [SerializeField] private bool enablePassiveGuidance = true;
+    [SerializeField] private Scrollbar passiveGuidanceScrollbar;
     [SerializeField] private float stableSeconds = 3f;
     [SerializeField] private float cooldownSeconds = 10f;
     [SerializeField] private bool preferPoiTriggerSettings = true;
@@ -62,6 +70,11 @@ public class AgentController : MonoBehaviour
 
     private IAgentTextService m_textService;
     private IAgentSpeechService m_speechService;
+    private Coroutine m_activeRequestCoroutine;
+    private AgentRequestKind? m_activeRequestKind;
+    private string m_activePassiveLabel;
+    private bool m_pendingPassiveCooldownAfterManual;
+    private string m_pendingPassiveCooldownLabel;
 
     private struct PoiObservation
     {
@@ -69,6 +82,7 @@ public class AgentController : MonoBehaviour
         public Vector3 worldPosition;
         public float distanceMeters;
         public float signedAngleDegrees;
+        public float detectionAngleDegrees;
     }
 
     public bool IsBusy => m_isBusy;
@@ -107,7 +121,13 @@ public class AgentController : MonoBehaviour
 
         audioSource.playOnAwake = false;
         InitializeServices();
+        BindPassiveGuidanceScrollbar();
         RefreshMapNameUi();
+    }
+
+    private void OnDestroy()
+    {
+        UnbindPassiveGuidanceScrollbar();
     }
 
     private void Update()
@@ -141,14 +161,38 @@ public class AgentController : MonoBehaviour
             return;
         }
 
-        if (m_isBusy)
+        string prompt = BuildManualQuestionPrompt(userQuestion);
+        StartAgentRequest(prompt, AgentRequestKind.Manual);
+    }
+
+    public void SetPassiveGuidanceEnabledFromScrollbar(float value)
+    {
+        bool shouldEnable = Mathf.Approximately(value, 1f);
+        SetPassiveGuidanceEnabled(shouldEnable);
+    }
+
+    public void SetPassiveGuidanceEnabled(bool enabled)
+    {
+        if (enablePassiveGuidance == enabled)
         {
-            Debug.LogWarning("AgentController: agent is busy, skipping manual question.");
             return;
         }
 
-        string prompt = BuildManualQuestionPrompt(userQuestion);
-        StartCoroutine(GenerateAndSpeak(prompt));
+        enablePassiveGuidance = enabled;
+        if (!enablePassiveGuidance)
+        {
+            ResetPassiveTracking();
+            m_cooldownTimer = 0f;
+            if (m_activeRequestKind == AgentRequestKind.Passive)
+            {
+                InterruptCurrentRequest(clearPendingPassiveCooldown: true);
+            }
+        }
+        else
+        {
+            ResetPassiveTracking();
+            m_cooldownTimer = 0f;
+        }
     }
 
     public void StartProcessingSound()
@@ -207,11 +251,8 @@ public class AgentController : MonoBehaviour
             return;
         }
 
-        m_lastHandledPassiveLabel = currentLabel;
-        m_cooldownTimer = cooldownSeconds;
-
         string prompt = BuildPassiveGuidancePrompt(statusMessage, nearestObservation, directionText);
-        StartCoroutine(GenerateAndSpeak(prompt));
+        StartAgentRequest(prompt, AgentRequestKind.Passive, currentLabel);
     }
 
     private void ResetPassiveTracking()
@@ -389,17 +430,31 @@ public class AgentController : MonoBehaviour
         {
             Vector3 worldPosition = labelParent.TransformPoint(poiRecord.localPosition);
             Vector3 toPoi = worldPosition - userTransform.position;
+            Vector2 worldPlaneOffset = new Vector2(
+                worldPosition.x - userTransform.position.x,
+                worldPosition.z - userTransform.position.z);
             Vector3 flatToPoi = Vector3.ProjectOnPlane(toPoi, Vector3.up);
             float angle = flatToPoi.sqrMagnitude > 0.0001f
                 ? Vector3.SignedAngle(userForward, flatToPoi.normalized, Vector3.up)
+                : 0f;
+            Vector3 fromPoiToUser = userTransform.position - worldPosition;
+            Vector3 flatFromPoiToUser = Vector3.ProjectOnPlane(fromPoiToUser, Vector3.up);
+            Vector3 poiForward = Vector3.ProjectOnPlane(labelParent.TransformDirection(Vector3.forward), Vector3.up);
+            if (poiForward.sqrMagnitude < 0.0001f)
+            {
+                poiForward = Vector3.forward;
+            }
+            float detectionAngle = flatFromPoiToUser.sqrMagnitude > 0.0001f
+                ? Vector3.SignedAngle(poiForward.normalized, flatFromPoiToUser.normalized, Vector3.up)
                 : 0f;
 
             observations.Add(new PoiObservation
             {
                 poiRecord = poiRecord,
                 worldPosition = worldPosition,
-                distanceMeters = toPoi.magnitude,
-                signedAngleDegrees = angle
+                distanceMeters = worldPlaneOffset.magnitude,
+                signedAngleDegrees = angle,
+                detectionAngleDegrees = detectionAngle
             });
         }
 
@@ -547,7 +602,7 @@ public class AgentController : MonoBehaviour
     {
         if (!preferPoiTriggerSettings || observation.poiRecord == null)
         {
-            return Mathf.Abs(observation.signedAngleDegrees) <= facingAngleThreshold;
+            return Mathf.Abs(observation.detectionAngleDegrees) <= facingAngleThreshold;
         }
 
         float minAngle = observation.poiRecord.angle1;
@@ -560,13 +615,34 @@ public class AgentController : MonoBehaviour
         bool hasCustomRange = !Mathf.Approximately(minAngle, 0f) || !Mathf.Approximately(maxAngle, 0f);
         if (!hasCustomRange)
         {
-            return Mathf.Abs(observation.signedAngleDegrees) <= facingAngleThreshold;
+            return Mathf.Abs(observation.detectionAngleDegrees) <= facingAngleThreshold;
         }
 
-        return observation.signedAngleDegrees >= minAngle && observation.signedAngleDegrees <= maxAngle;
+        return observation.detectionAngleDegrees >= minAngle && observation.detectionAngleDegrees <= maxAngle;
     }
 
     private bool IsInsidePoi(LocalizedMapPoiRecord poiRecord)
+    {
+        return IsWithinPoiBounds(poiRecord, 0f);
+    }
+
+    private bool IsInsidePoiTriggerArea(PoiObservation observation)
+    {
+        if (observation.poiRecord == null)
+        {
+            return false;
+        }
+
+        if (IsInsidePoi(observation.poiRecord))
+        {
+            return false;
+        }
+
+        float expansion = ResolveDistanceLimit(observation.poiRecord);
+        return IsWithinPoiBounds(observation.poiRecord, expansion) && IsWithinFacingWindow(observation);
+    }
+
+    private bool IsWithinPoiBounds(LocalizedMapPoiRecord poiRecord, float marginExpansion)
     {
         if (poiRecord == null || localizationManager == null || localizationManager.MapSpace == null)
         {
@@ -581,17 +657,12 @@ public class AgentController : MonoBehaviour
 
         Vector3 userLocal = localizationManager.MapSpace.transform.InverseTransformPoint(userTransform.position);
         Vector3 center = poiRecord.localPosition;
-        float halfX = Mathf.Max(0.01f, poiRecord.localScale.x * 0.5f);
-        float halfZ = Mathf.Max(0.01f, poiRecord.localScale.z * 0.5f);
+        float expansion = Mathf.Max(0f, marginExpansion);
+        float halfX = Mathf.Max(0.01f, poiRecord.localScale.x * 0.5f) + expansion;
+        float halfZ = Mathf.Max(0.01f, poiRecord.localScale.z * 0.5f) + expansion;
 
         return Mathf.Abs(userLocal.x - center.x) <= halfX + 1e-6f &&
                Mathf.Abs(userLocal.z - center.z) <= halfZ + 1e-6f;
-    }
-
-    private bool IsInsidePoiTriggerArea(PoiObservation observation)
-    {
-        float distanceLimit = ResolveDistanceLimit(observation.poiRecord);
-        return observation.distanceMeters <= distanceLimit && IsWithinFacingWindow(observation);
     }
 
     private void UpdateStatusUi(string nearestLabel, string directionText, string insideText, string statusMessage, PlayerSituation situation)
@@ -652,7 +723,79 @@ public class AgentController : MonoBehaviour
         return roundedMeters == 1 ? "about 1 meter" : $"about {roundedMeters} meters";
     }
 
-    private IEnumerator GenerateAndSpeak(string prompt)
+    private void StartAgentRequest(string prompt, AgentRequestKind requestKind, string passiveLabel = null)
+    {
+        if (requestKind == AgentRequestKind.Manual)
+        {
+            InterruptCurrentRequest();
+        }
+        else if (m_isBusy)
+        {
+            return;
+        }
+
+        m_activeRequestKind = requestKind;
+        m_activePassiveLabel = requestKind == AgentRequestKind.Passive ? passiveLabel : null;
+        m_activeRequestCoroutine = StartCoroutine(GenerateAndSpeak(prompt, requestKind, passiveLabel));
+    }
+
+    private void InterruptCurrentRequest(bool clearPendingPassiveCooldown = false)
+    {
+        bool interruptedPassiveRequest = m_activeRequestKind == AgentRequestKind.Passive && !string.IsNullOrEmpty(m_activePassiveLabel);
+        if (m_activeRequestCoroutine != null)
+        {
+            StopCoroutine(m_activeRequestCoroutine);
+            m_activeRequestCoroutine = null;
+        }
+
+        m_speechService?.Stop();
+        if (audioSource != null)
+        {
+            audioSource.Stop();
+        }
+
+        StopProcessingSound();
+        m_isBusy = false;
+
+        if (interruptedPassiveRequest)
+        {
+            m_pendingPassiveCooldownAfterManual = true;
+            m_pendingPassiveCooldownLabel = m_activePassiveLabel;
+        }
+
+        if (clearPendingPassiveCooldown)
+        {
+            m_pendingPassiveCooldownAfterManual = false;
+            m_pendingPassiveCooldownLabel = null;
+        }
+
+        m_activeRequestKind = null;
+        m_activePassiveLabel = null;
+    }
+
+    private void BindPassiveGuidanceScrollbar()
+    {
+        if (passiveGuidanceScrollbar == null)
+        {
+            return;
+        }
+
+        passiveGuidanceScrollbar.onValueChanged.RemoveListener(SetPassiveGuidanceEnabledFromScrollbar);
+        passiveGuidanceScrollbar.onValueChanged.AddListener(SetPassiveGuidanceEnabledFromScrollbar);
+        SetPassiveGuidanceEnabledFromScrollbar(passiveGuidanceScrollbar.value);
+    }
+
+    private void UnbindPassiveGuidanceScrollbar()
+    {
+        if (passiveGuidanceScrollbar == null)
+        {
+            return;
+        }
+
+        passiveGuidanceScrollbar.onValueChanged.RemoveListener(SetPassiveGuidanceEnabledFromScrollbar);
+    }
+
+    private IEnumerator GenerateAndSpeak(string prompt, AgentRequestKind requestKind, string passiveLabel)
     {
         if (m_textService == null || m_speechService == null)
         {
@@ -671,6 +814,9 @@ public class AgentController : MonoBehaviour
         if (!string.IsNullOrEmpty(generationError))
         {
             m_isBusy = false;
+            m_activeRequestCoroutine = null;
+            m_activeRequestKind = null;
+            m_activePassiveLabel = null;
             StopProcessingSound();
             Debug.LogWarning("AgentController: text generation failed: " + generationError);
             yield break;
@@ -679,6 +825,9 @@ public class AgentController : MonoBehaviour
         if (string.IsNullOrWhiteSpace(generatedText))
         {
             m_isBusy = false;
+            m_activeRequestCoroutine = null;
+            m_activeRequestKind = null;
+            m_activePassiveLabel = null;
             StopProcessingSound();
             Debug.LogWarning("AgentController: generated text was empty.");
             yield break;
@@ -697,6 +846,24 @@ public class AgentController : MonoBehaviour
             error => speechError = error);
 
         m_isBusy = false;
+        m_activeRequestCoroutine = null;
+
+        if (requestKind == AgentRequestKind.Passive && string.IsNullOrEmpty(speechError))
+        {
+            m_lastHandledPassiveLabel = passiveLabel;
+            m_cooldownTimer = cooldownSeconds;
+        }
+        else if (requestKind == AgentRequestKind.Manual && m_pendingPassiveCooldownAfterManual)
+        {
+            m_lastHandledPassiveLabel = m_pendingPassiveCooldownLabel;
+            m_cooldownTimer = cooldownSeconds;
+            m_pendingPassiveCooldownAfterManual = false;
+            m_pendingPassiveCooldownLabel = null;
+            m_stableTimer = 0f;
+        }
+
+        m_activeRequestKind = null;
+        m_activePassiveLabel = null;
 
         if (!string.IsNullOrEmpty(speechError))
         {

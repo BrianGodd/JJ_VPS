@@ -19,6 +19,8 @@ namespace MultiSet
 		[Header("Map Mesh Settings")]
 		[SerializeField]
 		private MeshVisualizationOption meshVisualizationOption = MeshVisualizationOption.EnableVisualization;
+		[SerializeField]
+		private bool preserveLabelsOverMesh = true;
 
 		private bool m_localizeSuccess;
 
@@ -29,6 +31,7 @@ namespace MultiSet
 		private Material m_meshMaterial;
 
 		private Material occlusionMaterial;
+		private Material m_labelFriendlyMeshMaterial;
 
 		private VpsMap m_vpsMap;
 
@@ -45,6 +48,15 @@ namespace MultiSet
 			if ((Object)(object)Instance == (Object)null)
 			{
 				Instance = this;
+			}
+		}
+
+		private void OnDestroy()
+		{
+			if ((Object)(object)m_labelFriendlyMeshMaterial != (Object)null)
+			{
+				Object.Destroy((Object)(object)m_labelFriendlyMeshMaterial);
+				m_labelFriendlyMeshMaterial = null;
 			}
 		}
 
@@ -205,7 +217,12 @@ namespace MultiSet
 				{
 					if (meshVisualizationOption.Equals(MeshVisualizationOption.EnableOcclusion))
 					{
-						if ((Object)(object)occlusionMaterial != (Object)null)
+						Material runtimeOcclusionSafeMaterial = GetLabelFriendlyMeshMaterial();
+						if ((Object)(object)runtimeOcclusionSafeMaterial != (Object)null)
+						{
+							sharedMaterials[j] = runtimeOcclusionSafeMaterial;
+						}
+						else if ((Object)(object)occlusionMaterial != (Object)null)
 						{
 							sharedMaterials[j] = occlusionMaterial;
 						}
@@ -222,6 +239,39 @@ namespace MultiSet
 					component = meshObject.AddComponent<ShaderProgressAnimator>();
 				}
 			}
+		}
+
+		private Material GetLabelFriendlyMeshMaterial()
+		{
+			if (!preserveLabelsOverMesh)
+			{
+				return null;
+			}
+			if ((Object)(object)m_labelFriendlyMeshMaterial != (Object)null)
+			{
+				return m_labelFriendlyMeshMaterial;
+			}
+			if ((Object)(object)m_meshMaterial == (Object)null)
+			{
+				return null;
+			}
+			m_labelFriendlyMeshMaterial = new Material(m_meshMaterial);
+			((Object)m_labelFriendlyMeshMaterial).name = ((Object)m_meshMaterial).name + "_LabelFriendlyRuntime";
+			m_labelFriendlyMeshMaterial.renderQueue = 3990;
+			if (m_labelFriendlyMeshMaterial.HasProperty("_ZWrite"))
+			{
+				m_labelFriendlyMeshMaterial.SetFloat("_ZWrite", 0f);
+			}
+			if (m_labelFriendlyMeshMaterial.HasProperty("_SrcBlend"))
+			{
+				m_labelFriendlyMeshMaterial.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.SrcAlpha);
+			}
+			if (m_labelFriendlyMeshMaterial.HasProperty("_DstBlend"))
+			{
+				m_labelFriendlyMeshMaterial.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+			}
+			m_labelFriendlyMeshMaterial.SetOverrideTag("RenderType", "Transparent");
+			return m_labelFriendlyMeshMaterial;
 		}
 
 		internal void LocalizationSuccessCallback()

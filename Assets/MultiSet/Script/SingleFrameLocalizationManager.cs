@@ -61,6 +61,10 @@ namespace MultiSet
 		[SerializeField]
 		private Camera arCamera;
 
+		[SerializeField]
+		[Tooltip("Optional pose source used for localization math. When assigned, localization uses this transform's position/rotation instead of the render camera transform.")]
+		private Transform queryPoseOverride;
+
 		private ARCameraManager m_CameraManager;
 
 		private int compressionRatio = 1;
@@ -122,8 +126,8 @@ namespace MultiSet
 		public int _requestAttempts = 3;
 
 		[Tooltip("Localization Attempts Interval in seconds")]
-		[Range(1f, 5f)]
-		public int localizationInterval = 1;
+		[Range(0f, 3f)]
+		public float localizationInterval = 1;
 
 		private int m_currentLocalizeCount = 0;
 
@@ -396,8 +400,13 @@ namespace MultiSet
 			XRCpuImage val = default(XRCpuImage);
 			if (m_CameraManager.TryAcquireLatestCpuImage(out val))
 			{
-				queryCameraPos = ((Component)arCamera).transform.position;
-				queryCameraRot = ((Component)arCamera).transform.rotation;
+				if (!TryGetCurrentQueryPose(out queryCameraPos, out queryCameraRot))
+				{
+					val.Dispose();
+					isLocalizing = false;
+					Debug.LogError((object)"No camera pose available for localization request.");
+					return;
+				}
 				if (passGeoPose && (Object)(object)GpsCoordinateHandler.Instance != (Object)null)
 				{
 					coordinates = GpsCoordinateHandler.Instance.gpsCoordinates;
@@ -734,6 +743,7 @@ namespace MultiSet
 
 		private void ApplyLocalizationPose(LocalizationResult bestResult)
 		{
+			float applyPoseStartTime = Time.realtimeSinceStartup;
 			//IL_007f: Unknown result type (might be due to invalid IL or missing references)
 			//IL_0080: Unknown result type (might be due to invalid IL or missing references)
 			//IL_0081: Unknown result type (might be due to invalid IL or missing references)
@@ -792,6 +802,8 @@ namespace MultiSet
 			{
 				GetMeshFile(bestResult.response.mapIds[0]);
 			}
+			float applyPoseElapsedSeconds = Time.realtimeSinceStartup - applyPoseStartTime;
+			Debug.Log((object)("ApplyLocalizationPose took " + applyPoseElapsedSeconds.ToString("F4") + " seconds."));
 		}
 
 		private IEnumerator RequestForBackgroundLocalization()
@@ -1093,8 +1105,12 @@ namespace MultiSet
 					LocalizationFailureCallback();
 					return;
 				}
-				queryCameraPos = ((Component)arCamera).transform.position;
-				queryCameraRot = ((Component)arCamera).transform.rotation;
+				if (!TryGetCurrentQueryPose(out queryCameraPos, out queryCameraRot))
+				{
+					Debug.LogError((object)"No camera pose available for simulation localization.");
+					LocalizationFailureCallback();
+					return;
+				}
 				CameraParams cameraParams = new CameraParams();
 				Resolution resolution = new Resolution();
 				cameraParams.fx = simulationData.fx;
@@ -1157,20 +1173,40 @@ namespace MultiSet
 
 		private bool TryGetCurrentQueryPose(out Vector3 cameraPosition, out Quaternion cameraRotation)
 		{
-			Camera val = arCamera;
-			if ((Object)(object)val == (Object)null)
+			Transform val = GetPreferredQueryPoseTransform();
+			if ((Object)(object)val != (Object)null)
 			{
-				val = Camera.main;
+				cameraPosition = val.position;
+				cameraRotation = val.rotation;
+				return true;
 			}
-			if ((Object)(object)val == (Object)null)
+			Camera val2 = arCamera;
+			if ((Object)(object)val2 == (Object)null)
+			{
+				val2 = Camera.main;
+			}
+			if ((Object)(object)val2 == (Object)null)
 			{
 				cameraPosition = Vector3.zero;
 				cameraRotation = Quaternion.identity;
 				return false;
 			}
-			cameraPosition = ((Component)val).transform.position;
-			cameraRotation = ((Component)val).transform.rotation;
+			cameraPosition = ((Component)val2).transform.position;
+			cameraRotation = ((Component)val2).transform.rotation;
 			return true;
+		}
+
+		private Transform GetPreferredQueryPoseTransform()
+		{
+			if ((Object)(object)queryPoseOverride != (Object)null)
+			{
+				return queryPoseOverride;
+			}
+			if ((Object)(object)arCamera != (Object)null)
+			{
+				return ((Component)arCamera).transform;
+			}
+			return null;
 		}
 
 		private static CameraParams CloneCameraParams(CameraParams source)

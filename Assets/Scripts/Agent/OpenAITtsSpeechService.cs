@@ -8,6 +8,8 @@ using UnityEngine.Networking;
 public class OpenAITtsSpeechService : IAgentSpeechService
 {
     private readonly AgentApiSettings settings;
+    private AudioSource m_currentAudioSource;
+    private bool m_stopRequested;
 
     public OpenAITtsSpeechService(AgentApiSettings settings)
     {
@@ -16,89 +18,120 @@ public class OpenAITtsSpeechService : IAgentSpeechService
 
     public IEnumerator Speak(string text, AudioSource audioSource, Action onSuccess, Action<string> onError)
     {
-        if (audioSource == null)
+        m_stopRequested = false;
+        m_currentAudioSource = audioSource;
+        try
         {
-            onError?.Invoke("AudioSource is missing.");
-            yield break;
-        }
-
-        if (string.IsNullOrEmpty(settings.apiKey))
-        {
-            onError?.Invoke("API key is empty.");
-            yield break;
-        }
-
-        string json = "{" +
-            "\"model\":\"" + AgentJsonUtility.EscapeJson(settings.speechModel) + "\"," +
-            "\"voice\":\"" + AgentJsonUtility.EscapeJson(settings.voice) + "\"," +
-            "\"input\":\"" + AgentJsonUtility.EscapeJson(text) + "\"," +
-            "\"format\":\"" + AgentJsonUtility.EscapeJson(settings.audioFormat) + "\"" +
-        "}";
-
-        using (var uw = new UnityWebRequest(settings.speechBaseUrl, "POST"))
-        {
-            byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
-            uw.uploadHandler = new UploadHandlerRaw(bodyRaw);
-            uw.downloadHandler = new DownloadHandlerBuffer();
-            uw.SetRequestHeader("Content-Type", "application/json");
-            uw.SetRequestHeader("Authorization", $"Bearer {settings.apiKey}");
-
-            yield return uw.SendWebRequest();
-
-            if (uw.result != UnityWebRequest.Result.Success)
+            if (audioSource == null)
             {
-                onError?.Invoke($"{uw.error} - {uw.downloadHandler.text}");
+                onError?.Invoke("AudioSource is missing.");
                 yield break;
             }
 
-            byte[] audioBytes = ResolveAudioBytes(uw);
-            if (audioBytes == null || audioBytes.Length == 0)
+            if (string.IsNullOrEmpty(settings.apiKey))
             {
-                onError?.Invoke("No audio bytes available after parsing TTS response.");
+                onError?.Invoke("API key is empty.");
                 yield break;
             }
 
-            string extension = string.Equals(settings.audioFormat, "wav", StringComparison.OrdinalIgnoreCase) ? ".wav" : ".mp3";
-            string tmpPath = Path.Combine(Application.temporaryCachePath, "agent_tts_" + Guid.NewGuid().ToString("N") + extension);
+            string json = "{" +
+                "\"model\":\"" + AgentJsonUtility.EscapeJson(settings.speechModel) + "\"," +
+                "\"voice\":\"" + AgentJsonUtility.EscapeJson(settings.voice) + "\"," +
+                "\"input\":\"" + AgentJsonUtility.EscapeJson(text) + "\"," +
+                "\"format\":\"" + AgentJsonUtility.EscapeJson(settings.audioFormat) + "\"" +
+            "}";
 
-            try
+            using (var uw = new UnityWebRequest(settings.speechBaseUrl, "POST"))
             {
-                File.WriteAllBytes(tmpPath, audioBytes);
-            }
-            catch (Exception ex)
-            {
-                onError?.Invoke("Failed to write temp audio file: " + ex.Message);
-                yield break;
-            }
+                byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
+                uw.uploadHandler = new UploadHandlerRaw(bodyRaw);
+                uw.downloadHandler = new DownloadHandlerBuffer();
+                uw.SetRequestHeader("Content-Type", "application/json");
+                uw.SetRequestHeader("Authorization", $"Bearer {settings.apiKey}");
 
-            AudioType audioType = string.Equals(settings.audioFormat, "wav", StringComparison.OrdinalIgnoreCase)
-                ? AudioType.WAV
-                : AudioType.MPEG;
+                yield return uw.SendWebRequest();
 
-            using (var uw2 = UnityWebRequestMultimedia.GetAudioClip("file://" + tmpPath, audioType))
-            {
-                yield return uw2.SendWebRequest();
-
-                try { File.Delete(tmpPath); } catch { }
-
-                if (uw2.result != UnityWebRequest.Result.Success)
+                if (m_stopRequested)
                 {
-                    onError?.Invoke("Failed to load audio clip: " + uw2.error);
                     yield break;
                 }
 
-                AudioClip clip = DownloadHandlerAudioClip.GetContent(uw2);
-                if (clip == null)
+                if (uw.result != UnityWebRequest.Result.Success)
                 {
-                    onError?.Invoke("Loaded audio clip was null.");
+                    onError?.Invoke($"{uw.error} - {uw.downloadHandler.text}");
                     yield break;
                 }
 
-                audioSource.Stop();
-                audioSource.clip = clip;
-                audioSource.Play();
-                onSuccess?.Invoke();
+                byte[] audioBytes = ResolveAudioBytes(uw);
+                if (audioBytes == null || audioBytes.Length == 0)
+                {
+                    onError?.Invoke("No audio bytes available after parsing TTS response.");
+                    yield break;
+                }
+
+                string extension = string.Equals(settings.audioFormat, "wav", StringComparison.OrdinalIgnoreCase) ? ".wav" : ".mp3";
+                string tmpPath = Path.Combine(Application.temporaryCachePath, "agent_tts_" + Guid.NewGuid().ToString("N") + extension);
+
+                try
+                {
+                    File.WriteAllBytes(tmpPath, audioBytes);
+                }
+                catch (Exception ex)
+                {
+                    onError?.Invoke("Failed to write temp audio file: " + ex.Message);
+                    yield break;
+                }
+
+                AudioType audioType = string.Equals(settings.audioFormat, "wav", StringComparison.OrdinalIgnoreCase)
+                    ? AudioType.WAV
+                    : AudioType.MPEG;
+
+                using (var uw2 = UnityWebRequestMultimedia.GetAudioClip("file://" + tmpPath, audioType))
+                {
+                    yield return uw2.SendWebRequest();
+
+                    if (m_stopRequested)
+                    {
+                        try { File.Delete(tmpPath); } catch { }
+                        yield break;
+                    }
+
+                    try { File.Delete(tmpPath); } catch { }
+
+                    if (uw2.result != UnityWebRequest.Result.Success)
+                    {
+                        onError?.Invoke("Failed to load audio clip: " + uw2.error);
+                        yield break;
+                    }
+
+                    AudioClip clip = DownloadHandlerAudioClip.GetContent(uw2);
+                    if (clip == null)
+                    {
+                        onError?.Invoke("Loaded audio clip was null.");
+                        yield break;
+                    }
+
+                    audioSource.Stop();
+                    audioSource.clip = clip;
+                    audioSource.Play();
+                    onSuccess?.Invoke();
+
+                    while (!m_stopRequested && audioSource.isPlaying)
+                    {
+                        yield return null;
+                    }
+
+                    if (m_stopRequested && audioSource != null)
+                    {
+                        audioSource.Stop();
+                    }
+                }
             }
+        }
+        finally
+        {
+            m_currentAudioSource = null;
+            m_stopRequested = false;
         }
     }
 
@@ -126,6 +159,15 @@ public class OpenAITtsSpeechService : IAgentSpeechService
         {
             Debug.LogWarning("OpenAITtsSpeechService: failed to decode base64 audio: " + ex.Message);
             return null;
+        }
+    }
+
+    public void Stop()
+    {
+        m_stopRequested = true;
+        if (m_currentAudioSource != null)
+        {
+            m_currentAudioSource.Stop();
         }
     }
 }

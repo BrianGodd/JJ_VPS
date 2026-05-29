@@ -41,4 +41,10 @@ public class FallbackSpeechService : IAgentSpeechService
 
         yield return fallback.Speak(text, audioSource, onSuccess, error => onError?.Invoke(primaryError ?? error));
     }
+
+    public void Stop()
+    {
+        primary?.Stop();
+        fallback?.Stop();
+    }
 }

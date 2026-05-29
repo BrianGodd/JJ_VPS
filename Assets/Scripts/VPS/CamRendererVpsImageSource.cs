@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using System;
 
 namespace JJ.Vps
 {
@@ -23,6 +24,8 @@ namespace JJ.Vps
         [SerializeField] private int imageWidth = 1280;
         [SerializeField] private int imageHeight = 720;
         [SerializeField, Range(40, 100)] private int jpegQuality = 80;
+        [SerializeField] private bool flipVerticallyForCameraBytes = true;
+        [SerializeField] private bool mirrorHorizontallyForCameraBytes = true;
 
         [Header("Intrinsics")]
         [SerializeField] private float fx = 1161.352133f;
@@ -32,6 +35,8 @@ namespace JJ.Vps
 
         [Header("Debug")]
         [SerializeField] private bool logRequests = true;
+        [SerializeField] private string galleryAlbumName = "JJUnityPlugin";
+        [SerializeField] private string savedFileNamePrefix = "VPS_Query";
         [SerializeField, HideInInspector] private CameraParameterPreset lastAppliedPreset = CameraParameterPreset.Current1280x720;
 
         private Texture2D m_rgbTexture;
@@ -114,6 +119,43 @@ namespace JJ.Vps
             return true;
         }
 
+        public void SaveCurrentQueryImageToGallery()
+        {
+            if (!TryBuildLocalizationRequest(out VpsLocalizationRequest request))
+            {
+                Debug.LogWarning("CamRendererVpsImageSource: unable to build localization request for gallery export.");
+                return;
+            }
+
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string filename = $"{savedFileNamePrefix}_{imageWidth}x{imageHeight}_{timestamp}.jpg";
+
+#if !UNITY_EDITOR
+            NativeGallery.Permission permission = NativeGallery.SaveImageToGallery(
+                request.encodedImageBytes,
+                galleryAlbumName,
+                filename,
+                (success, path) =>
+                {
+                    if (success)
+                    {
+                        Debug.Log($"CamRendererVpsImageSource: saved current VPS query image to gallery: {path}");
+                    }
+                    else
+                    {
+                        Debug.LogWarning("CamRendererVpsImageSource: failed to save current VPS query image to gallery.");
+                    }
+                });
+
+            if (permission != NativeGallery.Permission.Granted)
+            {
+                Debug.LogWarning($"CamRendererVpsImageSource: gallery save permission result = {permission}.");
+            }
+#else
+            Debug.Log($"CamRendererVpsImageSource: SaveCurrentQueryImageToGallery is intended for device builds. Prepared filename: {filename}");
+#endif
+        }
+
         private byte[] TryEncodeFromDebugImage()
         {
             if (!camRenderer.debugMode || camRenderer.image == null)
@@ -139,7 +181,7 @@ namespace JJ.Vps
             }
             finally
             {
-                Object.Destroy(rgbTexture);
+                UnityEngine.Object.Destroy(rgbTexture);
             }
         }
 
@@ -160,13 +202,23 @@ namespace JJ.Vps
                 m_rgbBuffer = new byte[rgbLength];
             }
 
-            for (int i = 0; i < imageWidth * imageHeight; i++)
+            for (int y = 0; y < imageHeight; y++)
             {
-                int rgbaIndex = rgbaOffset + i * 4;
-                int rgbIndex = i * 3;
-                m_rgbBuffer[rgbIndex] = rgbaBytes[rgbaIndex];
-                m_rgbBuffer[rgbIndex + 1] = rgbaBytes[rgbaIndex + 1];
-                m_rgbBuffer[rgbIndex + 2] = rgbaBytes[rgbaIndex + 2];
+                int sourceY = flipVerticallyForCameraBytes ? imageHeight - 1 - y : y;
+
+                for (int x = 0; x < imageWidth; x++)
+                {
+                    int sourceX = mirrorHorizontallyForCameraBytes ? imageWidth - 1 - x : x;
+                    int sourcePixelIndex = sourceY * imageWidth + sourceX;
+                    int destPixelIndex = y * imageWidth + x;
+
+                    int rgbaIndex = rgbaOffset + sourcePixelIndex * 4;
+                    int rgbIndex = destPixelIndex * 3;
+
+                    m_rgbBuffer[rgbIndex] = rgbaBytes[rgbaIndex];
+                    m_rgbBuffer[rgbIndex + 1] = rgbaBytes[rgbaIndex + 1];
+                    m_rgbBuffer[rgbIndex + 2] = rgbaBytes[rgbaIndex + 2];
+                }
             }
 
             if (m_rgbTexture == null || m_rgbTexture.width != imageWidth || m_rgbTexture.height != imageHeight)

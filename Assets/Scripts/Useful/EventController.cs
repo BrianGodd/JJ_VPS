@@ -44,6 +44,15 @@ public class EventController : MonoBehaviour
         StartCoroutine(TimeCustomEvent(time));
     }
 
+    public void SwitchScrollbarValue()
+    {
+        var scrollbar = this.GetComponent<UnityEngine.UI.Scrollbar>();
+        if (scrollbar != null)
+        {
+            scrollbar.value = 1 - scrollbar.value;
+        }
+    }
+
     IEnumerator TimeCustomEvent(float time)
     {
         yield return new WaitForSeconds(time);

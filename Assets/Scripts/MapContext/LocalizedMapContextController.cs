@@ -68,6 +68,14 @@ public class LocalizedMapContextController : MonoBehaviour
     [SerializeField] private TMP_FontAsset labelFontAsset;
     [SerializeField] private bool renderLabelsOnTop = true;
 
+    [Header("POI Visualization")]
+    [SerializeField] private bool showPoiVisualization = true;
+    [SerializeField] private bool showPoiFovGizmos = true;
+    [SerializeField] private Color poiInsideCubeColor = new Color(0.15f, 0.75f, 1f, 0.2f);
+    [SerializeField] private Color poiNearCubeColor = new Color(1f, 0.7f, 0.2f, 0.08f);
+    [SerializeField] private Color poiFovGizmoColor = new Color(1f, 0.7f, 0.2f, 0.9f);
+    [SerializeField] private float poiFovGizmoHeight = 0.05f;
+
     public LocalizedMapContextData CurrentContext { get; private set; }
     public Transform LabelParent => ResolveLabelParent();
     public SingleFrameLocalizationManager LocalizationManager => localizationManager;
@@ -75,9 +83,13 @@ public class LocalizedMapContextController : MonoBehaviour
     public event Action<LocalizedMapContextData> ContextLoaded;
 
     private GameObject m_labelRoot;
+    private GameObject m_poiVisualizationRoot;
     private int m_loadVersion;
     private Material m_panelOverlayMaterial;
     private Material m_textOverlayMaterial;
+    private Material m_poiInsideCubeMaterial;
+    private Material m_poiNearCubeMaterial;
+    private string m_currentLoadedMapKey;
 
     private void Awake()
     {
@@ -102,12 +114,14 @@ public class LocalizedMapContextController : MonoBehaviour
             localizationManager.LocalizationCompleted -= HandleLocalizationCompleted;
         }
 
-        ClearLabels();
+        ResetLoadedContext();
+        ClearRuntimeObjects();
     }
 
     private void OnDestroy()
     {
-        ClearLabels();
+        ResetLoadedContext();
+        ClearRuntimeObjects();
         ReleaseRuntimeMaterials();
     }
 
@@ -159,6 +173,22 @@ public class LocalizedMapContextController : MonoBehaviour
             return;
         }
 
+        string nextMapKey = BuildMapKey(mapId, mapName);
+        if (string.IsNullOrWhiteSpace(nextMapKey))
+        {
+            Debug.LogWarning("LocalizedMapContextController: localization did not provide a usable map key.");
+            return;
+        }
+
+        // Keep existing labels when relocalizing to the same map.
+        if (!string.IsNullOrWhiteSpace(m_currentLoadedMapKey) &&
+            string.Equals(m_currentLoadedMapKey, nextMapKey, StringComparison.Ordinal) &&
+            m_labelRoot != null &&
+            CurrentContext != null)
+        {
+            return;
+        }
+
         LocalizedMapContextData context = await BuildContextForMapAsync(mapId, mapName);
         if (loadVersion != m_loadVersion)
         {
@@ -166,6 +196,7 @@ public class LocalizedMapContextController : MonoBehaviour
         }
 
         CurrentContext = context;
+        m_currentLoadedMapKey = nextMapKey;
         SpawnLabels(context);
 
         if (logLoadedContext)
@@ -196,6 +227,8 @@ public class LocalizedMapContextController : MonoBehaviour
 
     private async Task<LocalizedMapContextData> BuildContextForMapAsync(string mapId, string mapName)
     {
+        System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
         LocalizedMapContextData context = new LocalizedMapContextData
         {
             mapId = mapId,
@@ -210,6 +243,9 @@ public class LocalizedMapContextController : MonoBehaviour
             List<LocalizedMapPoiRecord> poiRecords = await LoadPoisByTitleAsync(title);
             context.poiRecords.AddRange(poiRecords);
         }
+
+        stopwatch.Stop();
+        Debug.Log($"LocalizedMapContextController: BuildContextForMapAsync took {stopwatch.Elapsed.TotalSeconds:F3}s for mapName={mapName}, mapId={mapId}, titles={context.sourceTitles.Count}, poiCount={context.poiRecords.Count}");
 
         return context;
     }
@@ -309,7 +345,7 @@ public class LocalizedMapContextController : MonoBehaviour
 
     private void SpawnLabels(LocalizedMapContextData context)
     {
-        ClearLabels();
+        ClearRuntimeObjects();
 
         Transform parent = ResolveLabelParent();
         m_labelRoot = new GameObject("LocalizedMapLabels");
@@ -324,6 +360,8 @@ public class LocalizedMapContextController : MonoBehaviour
         {
             CreateLabel(poiRecord, m_labelRoot.transform);
         }
+
+        SpawnPoiVisualization(context, parent);
     }
 
     private Transform ResolveLabelParent()
@@ -341,13 +379,25 @@ public class LocalizedMapContextController : MonoBehaviour
         return ((Component)this).transform;
     }
 
-    private void ClearLabels()
+    private void ClearRuntimeObjects()
     {
         if (m_labelRoot != null)
         {
             Destroy(m_labelRoot);
             m_labelRoot = null;
         }
+
+        if (m_poiVisualizationRoot != null)
+        {
+            Destroy(m_poiVisualizationRoot);
+            m_poiVisualizationRoot = null;
+        }
+    }
+
+    private void ResetLoadedContext()
+    {
+        CurrentContext = null;
+        m_currentLoadedMapKey = null;
     }
 
     private void ReleaseRuntimeMaterials()
@@ -363,6 +413,151 @@ public class LocalizedMapContextController : MonoBehaviour
             Destroy(m_textOverlayMaterial);
             m_textOverlayMaterial = null;
         }
+
+        if (m_poiInsideCubeMaterial != null)
+        {
+            Destroy(m_poiInsideCubeMaterial);
+            m_poiInsideCubeMaterial = null;
+        }
+
+        if (m_poiNearCubeMaterial != null)
+        {
+            Destroy(m_poiNearCubeMaterial);
+            m_poiNearCubeMaterial = null;
+        }
+    }
+
+    private void SpawnPoiVisualization(LocalizedMapContextData context, Transform parent)
+    {
+        if (!showPoiVisualization || context == null || context.poiRecords == null || context.poiRecords.Count == 0)
+        {
+            return;
+        }
+
+        m_poiVisualizationRoot = new GameObject("LocalizedMapPoiVisualization");
+        m_poiVisualizationRoot.hideFlags = HideFlags.DontSaveInEditor | HideFlags.DontSaveInBuild;
+        m_poiVisualizationRoot.transform.SetParent(parent, false);
+        m_poiVisualizationRoot.transform.localPosition = Vector3.zero;
+        m_poiVisualizationRoot.transform.localRotation = Quaternion.identity;
+        m_poiVisualizationRoot.transform.localScale = Vector3.one;
+
+        Material insideCubeMaterial = GetPoiCubeMaterial(isNearCube: false);
+        Material nearCubeMaterial = GetPoiCubeMaterial(isNearCube: true);
+        foreach (LocalizedMapPoiRecord poiRecord in context.poiRecords)
+        {
+            CreatePoiCube(poiRecord, m_poiVisualizationRoot.transform, nearCubeMaterial, includeMargin: true, $"POI_Near_{poiRecord.label}");
+            CreatePoiCube(poiRecord, m_poiVisualizationRoot.transform, insideCubeMaterial, includeMargin: false, $"POI_Inside_{poiRecord.label}");
+        }
+    }
+
+    private void CreatePoiCube(LocalizedMapPoiRecord poiRecord, Transform parent, Material cubeMaterial, bool includeMargin, string objectName)
+    {
+        if (poiRecord == null)
+        {
+            return;
+        }
+
+        GameObject cubeObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        cubeObject.name = objectName;
+        cubeObject.hideFlags = HideFlags.DontSaveInEditor | HideFlags.DontSaveInBuild;
+        cubeObject.transform.SetParent(parent, false);
+        cubeObject.transform.localPosition = poiRecord.localPosition;
+        cubeObject.transform.localRotation = Quaternion.identity;
+        float marginExpansion = includeMargin ? Mathf.Max(0f, poiRecord.margin) * 2f : 0f;
+        cubeObject.transform.localScale = new Vector3(
+            Mathf.Max(0.02f, poiRecord.localScale.x + marginExpansion),
+            Mathf.Max(0.02f, poiRecord.localScale.y),
+            Mathf.Max(0.02f, poiRecord.localScale.z + marginExpansion));
+
+        Collider cubeCollider = cubeObject.GetComponent<Collider>();
+        if (cubeCollider != null)
+        {
+            Destroy(cubeCollider);
+        }
+
+        MeshRenderer meshRenderer = cubeObject.GetComponent<MeshRenderer>();
+        if (meshRenderer != null && cubeMaterial != null)
+        {
+            meshRenderer.sharedMaterial = cubeMaterial;
+            meshRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            meshRenderer.receiveShadows = false;
+        }
+    }
+
+    private Material GetPoiCubeMaterial(bool isNearCube)
+    {
+        Material existingMaterial = isNearCube ? m_poiNearCubeMaterial : m_poiInsideCubeMaterial;
+        if (existingMaterial != null)
+        {
+            existingMaterial.color = isNearCube ? poiNearCubeColor : poiInsideCubeColor;
+            return existingMaterial;
+        }
+
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null)
+        {
+            shader = Shader.Find("Standard");
+        }
+
+        if (shader == null)
+        {
+            Debug.LogWarning("LocalizedMapContextController: could not find a shader for POI visualization.");
+            return null;
+        }
+
+        Material createdMaterial = new Material(shader)
+        {
+            name = isNearCube ? "LocalizedMapPoiNearVisualizationMaterial" : "LocalizedMapPoiInsideVisualizationMaterial",
+            color = isNearCube ? poiNearCubeColor : poiInsideCubeColor,
+            renderQueue = 3000
+        };
+        SetupTransparentMaterial(createdMaterial);
+        if (isNearCube)
+        {
+            m_poiNearCubeMaterial = createdMaterial;
+        }
+        else
+        {
+            m_poiInsideCubeMaterial = createdMaterial;
+        }
+        return createdMaterial;
+    }
+
+    private static void SetupTransparentMaterial(Material material)
+    {
+        if (material == null)
+        {
+            return;
+        }
+
+        if (material.HasProperty("_Surface"))
+        {
+            material.SetFloat("_Surface", 1f);
+        }
+
+        if (material.HasProperty("_Blend"))
+        {
+            material.SetFloat("_Blend", 0f);
+        }
+
+        if (material.HasProperty("_SrcBlend"))
+        {
+            material.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        }
+
+        if (material.HasProperty("_DstBlend"))
+        {
+            material.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        }
+
+        if (material.HasProperty("_ZWrite"))
+        {
+            material.SetFloat("_ZWrite", 0f);
+        }
+
+        material.SetOverrideTag("RenderType", "Transparent");
+        material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        material.EnableKeyword("_ALPHABLEND_ON");
     }
 
     private void CreateLabel(LocalizedMapPoiRecord poiRecord, Transform parent)
@@ -374,6 +569,7 @@ public class LocalizedMapContextController : MonoBehaviour
         panelObject.transform.localRotation = Quaternion.identity;
         panelObject.transform.localScale = panelScale;
         panelObject.transform.SetAsLastSibling();
+        panelObject.layer = LayerMask.NameToLayer("LabelItems");
 
         Canvas canvas = panelObject.GetComponent<Canvas>();
         canvas.renderMode = RenderMode.WorldSpace;
@@ -402,6 +598,7 @@ public class LocalizedMapContextController : MonoBehaviour
         GameObject textObject = new GameObject("Label", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
         textObject.hideFlags = HideFlags.DontSaveInEditor | HideFlags.DontSaveInBuild;
         textObject.transform.SetParent(panelObject.transform, false);
+        textObject.layer = LayerMask.NameToLayer("LabelItems");
 
         RectTransform textRect = textObject.GetComponent<RectTransform>();
         textRect.anchorMin = Vector2.zero;
@@ -487,6 +684,61 @@ public class LocalizedMapContextController : MonoBehaviour
         return m_textOverlayMaterial;
     }
 
+    private void OnDrawGizmos()
+    {
+        if (!showPoiFovGizmos || CurrentContext == null || CurrentContext.poiRecords == null || CurrentContext.poiRecords.Count == 0)
+        {
+            return;
+        }
+
+        Transform parent = ResolveLabelParent();
+        if (parent == null)
+        {
+            return;
+        }
+
+        Gizmos.color = poiFovGizmoColor;
+        foreach (LocalizedMapPoiRecord poiRecord in CurrentContext.poiRecords)
+        {
+            DrawPoiFovGizmos(parent, poiRecord);
+        }
+    }
+
+    private void DrawPoiFovGizmos(Transform parent, LocalizedMapPoiRecord poiRecord)
+    {
+        if (poiRecord == null)
+        {
+            return;
+        }
+
+        Vector3 origin = parent.TransformPoint(poiRecord.localPosition + Vector3.up * poiFovGizmoHeight);
+        float halfExtent = Mathf.Max(poiRecord.localScale.x * 0.5f, poiRecord.localScale.z * 0.5f);
+        float range = Mathf.Max(0.05f, halfExtent + Mathf.Max(0f, poiRecord.margin));
+        float minAngle = Mathf.Min(poiRecord.angle1, poiRecord.angle2);
+        float maxAngle = Mathf.Max(poiRecord.angle1, poiRecord.angle2);
+
+        Vector3 leftDirection = parent.TransformDirection(DirectionFromAngle(minAngle));
+        Vector3 rightDirection = parent.TransformDirection(DirectionFromAngle(maxAngle));
+        Gizmos.DrawLine(origin, origin + leftDirection * range);
+        Gizmos.DrawLine(origin, origin + rightDirection * range);
+
+        const int segmentCount = 20;
+        Vector3 previousPoint = origin + leftDirection * range;
+        for (int i = 1; i <= segmentCount; i++)
+        {
+            float t = i / (float)segmentCount;
+            float angle = Mathf.Lerp(minAngle, maxAngle, t);
+            Vector3 nextPoint = origin + parent.TransformDirection(DirectionFromAngle(angle)) * range;
+            Gizmos.DrawLine(previousPoint, nextPoint);
+            previousPoint = nextPoint;
+        }
+    }
+
+    private static Vector3 DirectionFromAngle(float angleDegrees)
+    {
+        return Quaternion.Euler(0f, angleDegrees, 0f) * Vector3.forward;
+    }
+
     private static Vector3 ReadVector3(JObject obj, Vector3? fallback = null)
     {
         Vector3 defaultValue = fallback ?? Vector3.zero;
@@ -538,5 +790,20 @@ public class LocalizedMapContextController : MonoBehaviour
         }
 
         return obj.ToString();
+    }
+
+    private static string BuildMapKey(string mapId, string mapName)
+    {
+        if (!string.IsNullOrWhiteSpace(mapId))
+        {
+            return $"id:{mapId.Trim()}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(mapName))
+        {
+            return $"name:{mapName.Trim()}";
+        }
+
+        return null;
     }
 }
